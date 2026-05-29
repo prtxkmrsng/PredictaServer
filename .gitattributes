@@ -1,2 +1,12 @@
-# Auto detect text files and perform LF normalization
+# Set default behavior to automatically normalize line endings
 * text=auto
+
+# Explicitly declare text files to be normalized to LF on check-in
+*.py text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+Dockerfile text eol=lf
+
+# Denote neural network weights files as binary objects
+*.keras binary
+*.h5 binary
