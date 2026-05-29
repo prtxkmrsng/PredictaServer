@@ -1,0 +1,115 @@
+import asyncio
+import numpy as np
+from fastapi import FastAPI, HTTPException, status
+from pydantic import BaseModel, Field
+import tensorflow as tf
+
+# Initialize FastAPI instance
+app = FastAPI(
+    title="PredictaServer | Enterprise Scaling Engine",
+    description="High-performance sequential deep learning service for infrastructure utilization forecasting.",
+    version="1.0.0"
+)
+
+# Global model container
+MODEL_PATH = "server_lstm_model.keras"
+model = None
+
+@app.on_event("startup")
+def load_serialized_model():
+    """
+    Loads our binary Keras neural network into memory on API launch.
+    """
+    global model
+    try:
+        model = tf.keras.models.load_model(MODEL_PATH)
+        print(f"[Startup] Successfully initialized deep learning checkpoint: {MODEL_PATH}")
+    except Exception as e:
+        print(f"[Critical Startup Error] Failed to serialize model: {e}")
+        # We don't crash the server immediately, but keep model as None to handle gracefully
+
+# -------------------------------------------------------------------
+# DATA VALIDATION STRUCTURES
+# -------------------------------------------------------------------
+class UtilizationPayload(BaseModel):
+    # Enforce exactly 10 sequential steps matching our LSTM window architecture
+    sequence: list[float] = Field(
+        ..., 
+        example=[0.45, 0.48, 0.52, 0.50, 0.55, 0.61, 0.68, 0.72, 0.79, 0.84],
+        description="The past 10 continuous data readings representing scaled server CPU metrics."
+    )
+
+class AllocationResponse(BaseModel):
+    current_trend_average: float
+    forecasted_utilization: float
+    auto_scale_trigger: bool
+    recommended_instances: int
+
+# -------------------------------------------------------------------
+# ASYNC MODEL EXECUTION WRAPPER
+# -------------------------------------------------------------------
+def sync_model_inference(input_matrix: np.ndarray) -> float:
+    """
+    Isolated pure synchronous matrix evaluation.
+    This runs inside a background worker thread.
+    """
+    # model.predict returns an outer array; grab the internal floating point scale scalar
+    predictions = model.predict(input_matrix, verbose=0)
+    return float(predictions[0][0])
+
+# -------------------------------------------------------------------
+# ROUTING CONTROLLERS
+# -------------------------------------------------------------------
+@app.post("/predict", response_model=AllocationResponse, status_code=status.HTTP_200_OK)
+async def predict_infrastructure_scaling(payload: UtilizationPayload):
+    """
+    Consumes sequential infrastructure metrics, handles multi-threaded prediction, 
+    and outputs predictive scaling decisions.
+    """
+    if model is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            detail="Neural network engine is uninitialized or unreadable."
+        )
+        
+    # Validate payload array matrix sizing constraints
+    if len(payload.sequence) != 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid matrix dimensional length. Expected exactly 10 sequential elements, got {len(payload.sequence)}."
+        )
+        
+    # Format raw array list into a 3D Tensor matrix shape: (batch_size, timesteps, features)
+    input_tensor = np.array(payload.sequence, dtype=np.float32).reshape(1, 10, 1)
+    
+    try:
+        # Offload the blocking model prediction execution onto an isolated background thread
+        forecasted_value = await asyncio.to_thread(sync_model_inference, input_tensor)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Inference computation cluster failure: {str(e)}"
+        )
+        
+    # Decision matrix logic for horizontal auto-scaling actions
+    mean_historical = float(np.mean(payload.sequence))
+    trigger_action = False
+    instance_allocation = 2
+    
+    if forecasted_value >= 0.80:
+        trigger_action = True
+        instance_allocation = 6
+    elif forecasted_value >= 0.65:
+        trigger_action = True
+        instance_allocation = 4
+        
+    return AllocationResponse(
+        current_trend_average=round(mean_historical * 100, 2),
+        forecasted_utilization=round(forecasted_value * 100, 2),
+        auto_scale_trigger=trigger_action,
+        recommended_instances=instance_allocation
+    )
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "engine_loaded": model is not None}
