@@ -3,6 +3,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
 
 # Initialize FastAPI instance
 app = FastAPI(
@@ -11,12 +12,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Global model container
+# Global AI assets
 MODEL_PATH = "server_lstm_model.keras"
 model = None
+scaler = MinMaxScaler(feature_range=(0, 1))
 
 @app.on_event("startup")
-def load_serialized_model():
+async def load_serialized_model():
     """
     Loads our binary Keras neural network into memory on API launch.
     """
@@ -35,7 +37,7 @@ class UtilizationPayload(BaseModel):
     # Enforce exactly 10 sequential steps matching our LSTM window architecture
     sequence: list[float] = Field(
         ..., 
-        example=[0.45, 0.48, 0.52, 0.50, 0.55, 0.61, 0.68, 0.72, 0.79, 0.84],
+        example=[0.134, 0.134, 0.136, 0.132, 0.201, 0.350, 0.500, 0.800, 1.200, 1.500],
         description="The past 10 continuous data readings representing scaled server CPU metrics."
     )
 
@@ -48,14 +50,27 @@ class AllocationResponse(BaseModel):
 # -------------------------------------------------------------------
 # ASYNC MODEL EXECUTION WRAPPER
 # -------------------------------------------------------------------
-def sync_model_inference(input_matrix: np.ndarray) -> float:
+def sync_model_inference(input_sequence: list[float]) -> float:
     """
     Isolated pure synchronous matrix evaluation.
     This runs inside a background worker thread.
     """
-    # model.predict returns an outer array; grab the internal floating point scale scalar
-    predictions = model.predict(input_matrix, verbose=0)
-    return float(predictions[0][0])
+    # 1. Shape the raw data into a 2D array for the scaler
+    raw_array = np.array(input_sequence).reshape(-1, 1)
+    
+    # 2. Scale the data to the 0-1 range the neural network expects
+    scaled_array = scaler.fit_transform(raw_array)
+    
+    # 3. Reshape into the 3D Tensor matrix shape: (batch_size, timesteps, features)
+    inference_batch = scaled_array.reshape(1, 10, 1)
+    
+    # 4. Execute the prediction
+    raw_prediction = model.predict(inference_batch, verbose=0)
+    
+    # 5. Inverse transform to convert the 0-1 output back into real-world CPU values
+    real_value_prediction = scaler.inverse_transform(raw_prediction)
+    
+    return float(real_value_prediction[0][0])
 
 # -------------------------------------------------------------------
 # ROUTING CONTROLLERS
@@ -78,13 +93,10 @@ async def predict_infrastructure_scaling(payload: UtilizationPayload):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid matrix dimensional length. Expected exactly 10 sequential elements, got {len(payload.sequence)}."
         )
-        
-    # Format raw array list into a 3D Tensor matrix shape: (batch_size, timesteps, features)
-    input_tensor = np.array(payload.sequence, dtype=np.float32).reshape(1, 10, 1)
     
     try:
         # Offload the blocking model prediction execution onto an isolated background thread
-        forecasted_value = await asyncio.to_thread(sync_model_inference, input_tensor)
+        forecasted_value = await asyncio.to_thread(sync_model_inference, payload.sequence)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
