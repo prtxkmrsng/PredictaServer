@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
+import joblib
 
 # Initialize FastAPI instance
 app = FastAPI(
@@ -15,7 +16,7 @@ app = FastAPI(
 # Global AI assets
 MODEL_PATH = "server_lstm_model.keras"
 model = None
-scaler = MinMaxScaler(feature_range=(0, 1))
+scaler = joblib.load('scaler.gz')
 
 @app.on_event("startup")
 async def load_serialized_model():
@@ -59,7 +60,7 @@ def sync_model_inference(input_sequence: list[float]) -> float:
     raw_array = np.array(input_sequence).reshape(-1, 1)
     
     # 2. Scale the data to the 0-1 range the neural network expects
-    scaled_array = scaler.fit_transform(raw_array)
+    scaled_array = scaler.transform(raw_array)
     
     # 3. Reshape into the 3D Tensor matrix shape: (batch_size, timesteps, features)
     inference_batch = scaled_array.reshape(1, 10, 1)
